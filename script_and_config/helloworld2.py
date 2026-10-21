@@ -10,6 +10,7 @@
 #    chmod +a "user:_dd-agent allow list,search,readattr,readextattr,readsecurity" ~/Desktop
 
 import os
+import stat
 import json
 import time
 import logging
@@ -48,7 +49,8 @@ class Helloworld2Check(AgentCheck):
                     return False
                 if platform.system().lower() != 'windows':
                     try:
-                        if os.stat(full_path).st_flags & 0x8000:  # UF_HIDDEN
+                        # st_flags only exists on macOS/BSD, not on Linux
+                        if getattr(os.stat(full_path), 'st_flags', 0) & stat.UF_HIDDEN:
                             return False
                     except OSError:
                         pass
@@ -62,16 +64,23 @@ class Helloworld2Check(AgentCheck):
             self.log.warning(f"Could not access Desktop: {e}")
             file_count = -1
 
-        # Submit metric
-        self.gauge('helloworld2.desktop_file_count', file_count)
+        # Submit metric only on success; report failures via a service check
+        # so -1 doesn't pollute the gauge
+        if file_count >= 0:
+            self.gauge('helloworld2.desktop_file_count', file_count)
+            self.service_check('helloworld2.can_read_desktop', AgentCheck.OK)
+        else:
+            self.service_check('helloworld2.can_read_desktop', AgentCheck.CRITICAL,
+                               message=f"Could not access {desktop_path}")
 
         # Set log directory based on OS
-        if platform.system().lower() == 'windows':
+        system = platform.system().lower()
+        if system == 'windows':
             log_dir = os.environ.get("TEMP", "C:\\Temp")
-        else:
+        elif system == 'darwin':
             log_dir = '/opt/datadog-agent/logs'
-
-        os.makedirs(log_dir, exist_ok=True)
+        else:
+            log_dir = '/var/log/datadog'
 
         log_file = os.path.join(log_dir, 'helloworld2.log')
         state_file = os.path.join(log_dir, 'helloworld2_state.json')
@@ -81,7 +90,12 @@ class Helloworld2Check(AgentCheck):
         logger = logging.getLogger('helloworld2')
         logger.setLevel(logging.INFO)
         if not logger.handlers:
-            file_handler = logging.FileHandler(log_file)
+            try:
+                os.makedirs(log_dir, exist_ok=True)
+                file_handler = logging.FileHandler(log_file, encoding='utf-8')
+            except OSError as e:
+                self.log.warning(f"Could not open log file {log_file}: {e}")
+                return
             formatter = logging.Formatter('%(asctime)s %(levelname)s: %(message)s')
             file_handler.setFormatter(formatter)
             logger.addHandler(file_handler)
@@ -110,7 +124,9 @@ class Helloworld2Check(AgentCheck):
 
         # Log using correct level and emoji
         if log_this_run:
-            if file_count > 18:
+            if file_count < 0:
+                logger.error(f"❌ {log_reason} (Desktop not readable)")
+            elif file_count > 18:
                 logger.warning(f"⚠️ {log_reason}")
             else:
                 logger.info(f"✅ {log_reason}")
