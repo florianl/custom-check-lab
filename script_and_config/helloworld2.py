@@ -1,14 +1,19 @@
-# version 2.0 - special for Custom Check Lab
-# Changes vs 1.0:
-#  - Resolves the *console user's* Desktop via /dev/console instead of "~"
-#    (the Agent runs as _dd-agent since 7.79, whose home is /var/empty).
-#  - Works identically whether "Desktop & Documents Folders" iCloud sync
-#    is on or off: /Users/<user>/Desktop is the same path in both cases.
+# version 2.1 - special for Custom Check Lab
+# Changes vs 2.0:
+#  - Linux support: on Linux the agent runs as dd-agent (home /opt/datadog-agent,
+#  #  which has no Desktop), so we look for the logged-in user's Desktop under
+#  #  /home instead of using "~".
+#  - Optional "desktop_path" instance setting in conf.yaml overrides all
+#    auto-detection.
 #  - Requires on macOS: FDA on /opt/datadog-agent/bin/agent/agent (TCC layer)
 #    and an ACL on ~/Desktop for _dd-agent (POSIX layer, folders are mode 700
 #    on accounts created on modern macOS):
 #    chmod +a "user:_dd-agent allow list,search,readattr,readextattr,readsecurity" ~/Desktop
+#  - Requires on Linux: dd-agent must be able to reach the Desktop, e.g.
+#    home dirs are often mode 710/750, so:
+#    sudo setfacl -m u:dd-agent:x /home/<user>
 
+import glob
 import os
 import stat
 import json
@@ -22,23 +27,46 @@ from datadog_checks.base import AgentCheck
 class Helloworld2Check(AgentCheck):
     def check(self, instance):
         # Resolve Desktop path based on OS
-        if platform.system().lower() == 'windows':
-            desktop_path = os.path.join(os.environ.get("USERPROFILE", ""), "Desktop")
-        elif platform.system().lower() == 'darwin':
-            # "~" would expand to _dd-agent's home (/var/empty), so ask macOS
-            # who owns the console (= the logged-in GUI user) instead.
-            try:
-                console_user = subprocess.check_output(
-                    ["stat", "-f", "%Su", "/dev/console"], timeout=5
-                ).decode().strip()
-            except Exception:
-                console_user = None
-            if console_user and console_user not in ("root", ""):
-                desktop_path = f"/Users/{console_user}/Desktop"
+        desktop_path = instance.get('desktop_path')
+        if not desktop_path:
+            if platform.system().lower() == 'windows':
+                desktop_path = os.path.join(os.environ.get("USERPROFILE", ""), "Desktop")
+            elif platform.system().lower() == 'darwin':
+                # "~" would expand to _dd-agent's home (/var/empty), so ask macOS
+                # who owns the console (= the logged-in GUI user) instead.
+                try:
+                    console_user = subprocess.check_output(
+                        ["stat", "-f", "%Su", "/dev/console"], timeout=5
+                    ).decode().strip()
+                except Exception:
+                    console_user = None
+                if console_user and console_user not in ("root", ""):
+                    desktop_path = f"/Users/{console_user}/Desktop"
+                else:
+                    desktop_path = os.path.expanduser("~/Desktop")  # fallback (e.g. login screen)
             else:
-                desktop_path = os.path.expanduser("~/Desktop")  # fallback (e.g. login screen)
-        else:
-            desktop_path = os.path.expanduser("~/Desktop")
+                # Linux: the agent's dd-agent user has no Desktop of its own
+                # (/opt/datadog-agent). Look for human users' Desktops under /home.
+                candidates = sorted(glob.glob('/home/*/Desktop'))
+                if candidates:
+                    desktop_path = candidates[0]
+                    if len(candidates) > 1:
+                        self.log.warning(
+                            "Multiple Desktops found (%s); pass desktop_path in the instance config "
+                            "to pick one", candidates)
+                else:
+                    # Empty glob can mean "no Desktop exists" OR "dd-agent cannot
+                    # stat /home/* (home dirs are often 700/710 + an ACL whose mask
+                    # has been zeroed by a later chmod)". Log it so the fallback
+                    # below doesn't look like a mysterious bug.
+                    desktop_path = os.path.expanduser("~/Desktop")
+                    self.log.warning(
+                        "No Desktop found under /home/*/Desktop; this is often a permission "
+                        "issue for the agent user (check ACL mask on the home dirs). "
+                        "Falling back to %s", desktop_path
+                    )
+
+
 
         # Count visible files and folders
         try:

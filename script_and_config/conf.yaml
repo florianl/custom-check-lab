@@ -8,10 +8,16 @@ instances:
 
 logs:
   - type: file
-    path: /opt/datadog-agent/logs/helloworld2.log
+    # NOTE: the check writes to a different log_dir per OS (see helloworld2.py):
+    #   macOS:  /opt/datadog-agent/logs/helloworld2.log
+    #   Linux:  /var/log/datadog/helloworld2.log
+    # This lab runs on Linux, so point the tailer at the Linux path. Keep the
+    # macOS variant commented for reference.
+    path: /var/log/datadog/helloworld2.log
+    # path: /opt/datadog-agent/logs/helloworld2.log   # macOS
+
+    # On Windows, the script logs to %TEMP% (e.g., C:\Users\You\AppData\Local\Temp)
+    # To collect logs on Windows, you could change the path like:
+    # path: C:\Temp\helloworld2.log
     service: helloworld2
     source: custom
-
-  # On Windows, the script logs to %TEMP% (e.g., C:\Users\You\AppData\Local\Temp)
-  # To collect logs on Windows, you could change the path like:
-  # path: C:\Temp\helloworld2.log
